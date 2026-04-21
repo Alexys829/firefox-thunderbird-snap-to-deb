@@ -74,7 +74,8 @@ success "Pin APT creati."
 
 # ── 4. Aggiunta PPA Mozilla ────────────────────────────
 info "Aggiunta PPA Mozilla (ppa:mozillateam/ppa)..."
-if ! grep -r "mozillateam" /etc/apt/sources.list.d/ &>/dev/null; then
+PPA_FILE="/etc/apt/sources.list.d/mozillateam-ubuntu-ppa-*.list"
+if ! ls $PPA_FILE &>/dev/null; then
     add-apt-repository -y ppa:mozillateam/ppa
     success "PPA Mozilla aggiunto."
 else
@@ -83,8 +84,10 @@ fi
 
 # ── 5. Aggiornamento indice pacchetti ───────────────────────
 info "Aggiornamento lista pacchetti..."
-apt-get update -q
-success "Lista pacchetti aggiornata."
+apt-get update -q || die "Aggiornamento pacchetti fallito."
+
+# Rileva codename distro per configurazione aggiornamenti
+distro_codename=$(lsb_release -cs 2>/dev/null) || distro_codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
 
 # ── 6. Installazione Firefox e Thunderbird via APT ──────────
 info "Installazione Firefox dal PPA Mozilla..."
@@ -97,7 +100,7 @@ success "Thunderbird installato."
 
 # ── 7. Aggiornamenti automatici abilitati ───────────────────
 info "Configurazione aggiornamenti automatici per PPA Mozilla..."
-cat > /etc/apt/apt.conf.d/51unattended-upgrades-mozilla << 'AUTOEOF'
+cat > /etc/apt/apt.conf.d/51unattended-upgrades-mozilla << AUTOEOF
 Unattended-Upgrade::Allowed-Origins:: "LP-PPA-mozillateam:${distro_codename}";
 AUTOEOF
 success "Aggiornamenti automatici configurati."
@@ -109,11 +112,16 @@ echo -e "${GREEN} Verifica versioni installate${NC}"
 echo -e "${CYAN}══════════════════════════════════════════${NC}"
 
 for app in firefox thunderbird; do
-    if command -v "$app" &>/dev/null; then
+    APP_PATH=$(command -v "$app") || true
+    if [[ -n "$APP_PATH" ]]; then
         VER=$("$app" --version 2>/dev/null || echo "N/D")
         success "$app → $VER"
-        if readlink "$(command -v $app)" 2>/dev/null | grep -q snap; then
+        if [[ -L "$APP_PATH" ]] && readlink "$APP_PATH" | grep -q snap; then
             warn "$app punta ancora a snap! Riavvia il sistema e riprova."
+        fi
+        ORIGIN=$(dpkg-query -W -f='${binary:Package}\n' "$app" 2>/dev/null | head -1)
+        if [[ -n "$ORIGIN" ]]; then
+            info "Origine pacchetto: $ORIGIN"
         fi
     else
         warn "$app non trovato nel PATH."

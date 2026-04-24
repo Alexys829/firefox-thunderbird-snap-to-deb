@@ -17,19 +17,44 @@ die()     { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 # ── Elevazione automatica ──────────────────────────────
 if [[ $EUID -ne 0 ]]; then
     warn "Script non avviato come root. Tentativo di elevazione con sudo..."
-    exec sudo bash "$0" "$@"
+    if [[ -f "$0" && -r "$0" ]]; then
+        exec sudo bash "$0" "$@"
+    else
+        # Avviato via pipe o process substitution (es. bash <(curl ...)):
+        # $0 punta a un FD non accessibile da sudo. Copiamo in un file temporaneo.
+        tmp=$(mktemp /tmp/snap2deb.XXXXXX.sh)
+        cat "$0" > "$tmp"
+        chmod +x "$tmp"
+        exec sudo bash "$tmp" "$@"
+    fi
 fi
+
+# ── Verifica distro supportata ──────────────────────────
+if [[ -r /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    if [[ "${ID:-}" != "ubuntu" && "${ID_LIKE:-}" != *ubuntu* ]]; then
+        die "Distro non supportata (${PRETTY_NAME:-sconosciuta}). Richiesto Ubuntu o derivate."
+    fi
+else
+    die "Impossibile leggere /etc/os-release."
+fi
+
+# Rileva codename distro (serve per PPA e unattended-upgrades)
+distro_codename=$(lsb_release -cs 2>/dev/null || echo "${VERSION_CODENAME:-}")
+[[ -n "$distro_codename" ]] || die "Impossibile rilevare il codename della distro."
 
 # ── Verifica dipendenza software-properties-common ──────────
 if ! command -v add-apt-repository &>/dev/null; then
     info "Installazione software-properties-common (necessario per add-apt-repository)..."
+    apt-get update -q
     apt-get install -y software-properties-common
     success "software-properties-common installato."
 fi
 
 # ── 1. Smonta mount unit hunspell (Firefox snap) ────────────
 info "Pulizia mount unit hunspell di Firefox snap..."
-MOUNT_UNIT="var-snap-firefox-common-host\\x2dhunspell.mount"
+MOUNT_UNIT=$(systemd-escape -p --suffix=mount /var/snap/firefox/common/host-hunspell)
 if systemctl is-active --quiet "$MOUNT_UNIT" 2>/dev/null; then
     systemctl stop "$MOUNT_UNIT" || true
     systemctl disable "$MOUNT_UNIT" || true
@@ -51,7 +76,7 @@ done
 
 # Rimuovi eventuali stub APT rimasti
 info "Rimozione stub APT Firefox/Thunderbird..."
-apt-get remove --purge -y firefox thunderbird 2>/dev/null || true
+apt-get remove --purge -y firefox thunderbird || true
 apt-get autoremove -y
 success "Stub APT rimossi."
 
@@ -74,20 +99,16 @@ success "Pin APT creati."
 
 # ── 4. Aggiunta PPA Mozilla ────────────────────────────
 info "Aggiunta PPA Mozilla (ppa:mozillateam/ppa)..."
-PPA_FILE="/etc/apt/sources.list.d/mozillateam-ubuntu-ppa-*.list"
-if ! ls $PPA_FILE &>/dev/null; then
+if compgen -G "/etc/apt/sources.list.d/mozillateam-ubuntu-ppa-*.list" > /dev/null; then
+    info "PPA Mozilla già presente."
+else
     add-apt-repository -y ppa:mozillateam/ppa
     success "PPA Mozilla aggiunto."
-else
-    info "PPA Mozilla già presente."
 fi
 
 # ── 5. Aggiornamento indice pacchetti ───────────────────────
 info "Aggiornamento lista pacchetti..."
 apt-get update -q || die "Aggiornamento pacchetti fallito."
-
-# Rileva codename distro per configurazione aggiornamenti
-distro_codename=$(lsb_release -cs 2>/dev/null) || distro_codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
 
 # ── 6. Installazione Firefox e Thunderbird via APT ──────────
 info "Installazione Firefox dal PPA Mozilla..."
